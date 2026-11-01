@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lottie Sniffer</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <svg class="logo" viewBox="0 0 32 32" width="30" height="30" aria-hidden="true">
+          <defs>
+            <linearGradient id="brandGradient" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#7c6bff"/>
+              <stop offset="1" stop-color="#4ee0c8"/>
+            </linearGradient>
+          </defs>
+          <rect x="1.5" y="1.5" width="29" height="29" rx="9.5" fill="url(#brandGradient)"/>
+          <path d="M9.6 22.4C9.6 15 22.4 17 22.4 9.6" stroke="#fff" stroke-width="2.6" stroke-linecap="round" fill="none"/>
+          <circle cx="9.6" cy="22.4" r="2.3" fill="#fff"/>
+          <circle cx="22.4" cy="9.6" r="2.3" fill="#fff"/>
+        </svg>
+        <div class="titles">
+          <h1>Lottie Sniffer</h1>
+          <p id="site" class="site" title="">读取页面中…</p>
+        </div>
+        <span id="count" class="count" hidden>0</span>
+      </div>
+      <div class="top-actions">
+        <button id="btn-rescan" class="icon-btn" title="重新扫描当前页面">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 11a8 8 0 1 0-2.3 6.3"/>
+            <path d="M20 4v7h-7"/>
+          </svg>
+        </button>
+        <button id="btn-clear" class="icon-btn" title="清空当前页面的捕获结果">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 7h16"/>
+            <path d="M10 11v6M14 11v6"/>
+            <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"/>
+            <path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <div id="filters" class="filters" hidden>
+      <button class="chip active" data-filter="all">全部</button>
+      <button class="chip" data-filter="json">JSON</button>
+      <button class="chip" data-filter="lottie">.lottie</button>
+    </div>
+
+    <main id="list" class="list"></main>
+
+    <footer id="footer" class="footer" hidden>
+      <span id="summary" class="summary"></span>
+      <button id="btn-zip" class="primary-btn">打包下载 ZIP</button>
+    </footer>
+  </div>
+
+  <!-- 预览浮层 -->
+  <div id="preview" class="preview" hidden>
+    <header class="pv-head">
+      <div class="pv-titles">
+        <h2 id="pv-name">动画预览</h2>
+        <p id="pv-meta" class="pv-meta"></p>
+      </div>
+      <button id="pv-close" class="icon-btn" title="关闭预览">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M6 6l12 12M18 6L6 18"/>
+        </svg>
+      </button>
+    </header>
+
+    <div id="pv-stage" class="pv-stage bg-checker">
+      <div id="pv-canvas" class="pv-canvas"></div>
+      <div id="pv-loading" class="pv-loading">
+        <span class="spinner"></span>
+        <span>正在解析动画…</span>
+      </div>
+      <div id="pv-error" class="pv-error" hidden></div>
+    </div>
+
+    <div class="pv-controls">
+      <div class="pv-row">
+        <button id="pv-play" class="icon-btn" title="播放 / 暂停">
+          <svg id="pv-play-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+            <path d="M8 5v14l11-7z"/>
+          </svg>
+        </button>
+        <button id="pv-restart" class="icon-btn" title="从头播放">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 12a9 9 0 1 0 3-6.7"/>
+            <path d="M3 4v6h6"/>
+          </svg>
+        </button>
+        <input id="pv-seek" class="seek" type="range" min="0" max="100" value="0" step="1" aria-label="进度">
+        <span id="pv-time" class="pv-time">0.0s</span>
+      </div>
+      <div class="pv-row pv-row-2">
+        <label class="pv-speed">
+          <span>速度</span>
+          <select id="pv-speed">
+            <option value="0.25">0.25×</option>
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="1.5">1.5×</option>
+            <option value="2">2×</option>
+          </select>
+        </label>
+        <div class="bg-switch" id="bg-switch">
+          <button class="bg-btn active" data-bg="bg-checker">透明</button>
+          <button class="bg-btn" data-bg="bg-light">浅色</button>
+          <button class="bg-btn" data-bg="bg-dark">深色</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="pv-actions">
+      <button id="pv-copy" class="ghost-btn">复制 JSON</button>
+      <button id="pv-download" class="primary-btn">下载动画</button>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="lib/lottie.min.js"></script>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
