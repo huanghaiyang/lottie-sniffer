@@ -143,6 +143,7 @@ inject.js  ──postMessage──▶  content.js  ──sendMessage──▶  b
 | 弹窗提示「无法在这个页面运行」 | `chrome://`、扩展商店等页面禁止注入，请切换到普通 http/https 页面 |
 | 缩略图显示「无法预览」 | 正文读取失败或格式异常，可尝试重新扫描或直接下载后用其他工具检查 |
 | 下载失败 | 检查目标地址是否仍可访问（可能已过期或需要鉴权） |
+| `.lottie` 下载后变成 `.zip` | 旧版按 `application/zip` 下载时 Chrome 会按 MIME 改名。刷新扩展后重新下载即可（现在的下载 MIME 为 `application/octet-stream`）；若文件名仍是 `.lottie`，只是文件管理器把它显示为压缩文件，属正常现象（`.lottie` 本身就是 ZIP 包） |
 | 刚加载扩展后旧页面无反应 | 浏览器不会回溯注入已打开页面，点「重新扫描」即可自动补注入 |
 | 修改代码后不生效 | 到 `chrome://extensions/` 点击该扩展的刷新按钮，再刷新目标页面 |
 

@@ -190,10 +190,16 @@ function deriveName(payload, pageTitle) {
   return nm || 'animation';
 }
 
-/** 上报类型 -> 扩展名 / MIME */
+/**
+ * 上报类型 -> 扩展名 / MIME。
+ *
+ * 注意：`.lottie` 虽然本质是 ZIP，但下载时不能给 `application/zip`。
+ * Chrome 会按 MIME 做文件类型判定，遇到不认识的 `.lottie` 扩展名时会把文件名改成 `.zip`；
+ * 用 `application/octet-stream`（通用二进制）可以保留建议文件名里的 `.lottie` 后缀。
+ */
 function kindInfo(kind) {
   return kind === 'lottie'
-    ? { ext: 'lottie', mime: 'application/zip' }
+    ? { ext: 'lottie', mime: 'application/octet-stream' }
     : { ext: 'json', mime: 'application/json' };
 }
 
