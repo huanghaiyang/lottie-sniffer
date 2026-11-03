@@ -4,7 +4,9 @@
  * 界面职责：
  *   - 拉取当前标签页捕获到的动画列表并展示（缩略图 / 元信息）；
  *   - 支持按类型筛选、单个下载、批量打包下载；
- *   - 下载方式可选「JSON」（解包后的动画 JSON）或「压缩包」（保留原始 .lottie / .json 格式，多个时打成 ZIP）；
+ *   - 下载方式可选「JSON」（解包后的动画 JSON）或「压缩包」（保留原始 .lottie / .json 格式）；
+ *     .lottie 本身已是 ZIP 包，因此始终直接下载原文件，批量时也是逐个下载而不额外套 ZIP；
+ *     仅当结果全为 JSON 且数量大于 1 时才打包成 ZIP。
  *   - 内置预览器：用 lottie-web 渲染，支持播放 / 暂停 / 拖动进度 / 变速 / 切换背景；
  *   - .lottie（dotLottie）是 ZIP 包，解包逻辑位于 shared/dotlottie.js，Popup 与后台共用。
  */
@@ -348,6 +350,14 @@ function renderUnsupported() {
   `;
 }
 
+/** 是否需要打包 ZIP：JSON 方式下多个动画打成 JSON 包；
+ *  「压缩包」方式下只要含有 .lottie 就逐个直接下载原文件，不再套一层 ZIP。 */
+function shouldZipBatch(visible) {
+  if (visible.length <= 1) return false;
+  if (state.downloadFormat === 'json') return true;
+  return !visible.some((a) => a.kind === 'lottie');
+}
+
 function renderFooter() {
   const visible = visibleAssets();
   if (visible.length === 0) {
@@ -362,8 +372,10 @@ function renderFooter() {
 
   if (state.downloadFormat === 'json') {
     els.zip.textContent = visible.length === 1 ? '下载 JSON' : '打包 JSON';
+  } else if (shouldZipBatch(visible)) {
+    els.zip.textContent = '打包 ZIP';
   } else {
-    els.zip.textContent = visible.length === 1 ? '下载原文件' : '打包 ZIP';
+    els.zip.textContent = '下载原文件';
   }
 }
 
@@ -671,10 +683,11 @@ function bindEvents() {
   });
 
   els.zip.addEventListener('click', () => {
-    const ids = visibleAssets().map((a) => a.id);
+    const visible = visibleAssets();
+    const ids = visible.map((a) => a.id);
     if (ids.length === 0) return;
-    if (ids.length === 1) downloadAssets(ids, state.downloadFormat);
-    else downloadZip(ids, state.downloadFormat);
+    if (shouldZipBatch(visible)) downloadZip(ids, state.downloadFormat);
+    else downloadAssets(ids, state.downloadFormat);
   });
 
   els.pvClose.addEventListener('click', closePreview);
