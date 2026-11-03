@@ -56,7 +56,13 @@
 
     <footer id="footer" class="footer" hidden>
       <span id="summary" class="summary"></span>
-      <button id="btn-zip" class="primary-btn">打包下载 ZIP</button>
+      <div class="footer-actions">
+        <div id="fmt-switch" class="fmt-switch" title="下载方式：JSON 为解包后的动画文件；压缩包保留 .lottie 原始格式，多个动画时打包为 ZIP">
+          <button class="fmt-btn" data-format="json">JSON</button>
+          <button class="fmt-btn active" data-format="zip">压缩包</button>
+        </div>
+        <button id="btn-zip" class="primary-btn">打包 ZIP</button>
+      </div>
     </footer>
   </div>
 

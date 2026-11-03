@@ -457,11 +457,47 @@ button {
 }
 
 .summary {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 11px;
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.footer-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 下载方式：JSON / 压缩包 分段控件 */
+.fmt-switch {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.fmt-btn {
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 10.5px;
+  color: var(--muted);
+  transition: all 0.15s ease;
+}
+
+.fmt-btn:hover {
+  color: var(--text);
+}
+
+.fmt-btn.active {
+  color: #d9d4ff;
+  background: var(--accent-soft);
 }
 
 .primary-btn {

@@ -4,10 +4,12 @@
  * 界面职责：
  *   - 拉取当前标签页捕获到的动画列表并展示（缩略图 / 元信息）；
  *   - 支持按类型筛选、单个下载、批量打包下载；
+ *   - 下载方式可选「JSON」（解包后的动画 JSON）或「压缩包」（保留原始 .lottie / .json 格式，多个时打成 ZIP）；
  *   - 内置预览器：用 lottie-web 渲染，支持播放 / 暂停 / 拖动进度 / 变速 / 切换背景；
- *   - .lottie（dotLottie）是 ZIP 包，这里用 DecompressionStream 原生解压，不引入第三方库。
+ *   - .lottie（dotLottie）是 ZIP 包，解包逻辑位于 shared/dotlottie.js，Popup 与后台共用。
  */
-import { findAnimation, isAnimation } from './shared/detect.js';
+import { unzipDotLottie } from './shared/dotlottie.js';
+
 
 // ---------------------------------------------------------------- 常量
 
@@ -47,6 +49,7 @@ const els = {
   list: document.getElementById('list'),
   footer: document.getElementById('footer'),
   summary: document.getElementById('summary'),
+  fmtSwitch: document.getElementById('fmt-switch'),
   zip: document.getElementById('btn-zip'),
   preview: document.getElementById('preview'),
   pvName: document.getElementById('pv-name'),
@@ -73,12 +76,17 @@ const state = {
   supported: true,
   assets: [],
   filter: 'all',
+  /** 下载方式：json = 解包后的 JSON；zip = 原始文件（多个时打包 ZIP） */
+  downloadFormat: 'zip',
   thumbAnims: [],
   previewAsset: null,
   previewAnim: null,
   previewText: '',
   previewToken: 0
 };
+
+/** 下载方式的本地持久化键（localStorage 在弹窗之间共享） */
+const FORMAT_KEY = 'lottie-sniffer.format';
 
 /** id -> { json, text }，避免反复向后台请求正文 */
 const jsonCache = new Map();
@@ -145,6 +153,28 @@ function toast(message, tone) {
   }, 1800);
 }
 
+/** 读取上次选择的下载方式，非法值回退到「压缩包」 */
+function readFormat() {
+  try {
+    return localStorage.getItem(FORMAT_KEY) === 'json' ? 'json' : 'zip';
+  } catch {
+    return 'zip';
+  }
+}
+
+function saveFormat(format) {
+  try {
+    localStorage.setItem(FORMAT_KEY, format);
+  } catch {
+    /* 隐私模式下写入可能失败，忽略即可 */
+  }
+}
+
+/** 下载按钮文案随下载方式变化 */
+function formatLabel(format) {
+  return format === 'json' ? '下载 JSON' : '下载原文件';
+}
+
 async function sendBackground(message) {
   try {
     return await chrome.runtime.sendMessage(message);
@@ -164,6 +194,7 @@ function isSupportedPage(url) {
 // ---------------------------------------------------------------- 初始化
 
 async function init() {
+  state.downloadFormat = readFormat();
   try {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tab = tabs && tabs[0];
@@ -326,7 +357,30 @@ function renderFooter() {
   els.footer.hidden = false;
   const totalBytes = visible.reduce((sum, a) => sum + (a.bytes || 0), 0);
   els.summary.textContent = `${visible.length} 个 · ${formatBytes(totalBytes)}`;
-  els.zip.textContent = visible.length === 1 ? '下载动画' : '打包下载 ZIP';
+
+  syncFormatChips();
+
+  if (state.downloadFormat === 'json') {
+    els.zip.textContent = visible.length === 1 ? '下载 JSON' : '打包 JSON';
+  } else {
+    els.zip.textContent = visible.length === 1 ? '下载原文件' : '打包 ZIP';
+  }
+}
+
+/** 同步底部「JSON / 压缩包」分段控件的选中态 */
+function syncFormatChips() {
+  for (const btn of els.fmtSwitch.querySelectorAll('.fmt-btn')) {
+    btn.classList.toggle('active', btn.dataset.format === state.downloadFormat);
+  }
+}
+
+/** 下载方式变化后，刷新列表卡片与预览面板里的下载提示 */
+function updateDownloadLabels() {
+  const label = formatLabel(state.downloadFormat);
+  for (const btn of els.list.querySelectorAll('[data-act="download"]')) {
+    btn.title = label;
+  }
+  els.pvDownload.textContent = label;
 }
 
 function syncFilterChips() {
@@ -359,7 +413,7 @@ function createCard(asset) {
     </div>
     <div class="card-actions">
       <button class="mini-btn" data-act="preview" title="预览">${SVG_PREVIEW}</button>
-      <button class="mini-btn primary" data-act="download" title="下载">${SVG_DOWNLOAD}</button>
+      <button class="mini-btn primary" data-act="download" title="${formatLabel(state.downloadFormat)}">${SVG_DOWNLOAD}</button>
     </div>
   `;
 
@@ -368,7 +422,7 @@ function createCard(asset) {
     const act = event.target.closest('[data-act]');
     if (!act) return;
     if (act.dataset.act === 'download') {
-      downloadAssets([asset.id]);
+      downloadAssets([asset.id], state.downloadFormat);
     } else {
       openPreview(asset);
     }
@@ -466,117 +520,7 @@ async function getJson(asset) {
 
 // ---------------------------------------------------------------- .lottie 解包
 // dotLottie 文件本质是 ZIP（内含 manifest.json + animations/<id>.json）。
-// 这里实现一个最小的 ZIP 读取器，deflate 解压交给浏览器原生 DecompressionStream。
-
-function base64ToBytes(base64) {
-  const binary = atob(base64);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
-  return out;
-}
-
-/** 解析 ZIP 中央目录，返回每个条目的名称、压缩方式和数据切片 */
-function readZipEntries(bytes) {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-
-  // 从尾部向前查找 EOCD（End of Central Directory）签名
-  let eocd = -1;
-  const stop = Math.max(0, bytes.length - 22 - 0xffff);
-  for (let i = bytes.length - 22; i >= stop; i--) {
-    if (view.getUint32(i, true) === 0x06054b50) {
-      eocd = i;
-      break;
-    }
-  }
-  if (eocd < 0) throw new Error('不是有效的 ZIP / .lottie 文件');
-
-  const count = view.getUint16(eocd + 10, true);
-  let pointer = view.getUint32(eocd + 16, true);
-  const entries = [];
-
-  for (let i = 0; i < count; i++) {
-    if (pointer + 46 > bytes.length || view.getUint32(pointer, true) !== 0x02014b50) break;
-
-    const method = view.getUint16(pointer + 10, true);
-    const compressedSize = view.getUint32(pointer + 20, true);
-    const uncompressedSize = view.getUint32(pointer + 24, true);
-    const nameLength = view.getUint16(pointer + 28, true);
-    const extraLength = view.getUint16(pointer + 30, true);
-    const commentLength = view.getUint16(pointer + 32, true);
-    const localOffset = view.getUint32(pointer + 42, true);
-
-    const name = new TextDecoder().decode(
-      bytes.subarray(pointer + 46, pointer + 46 + nameLength)
-    );
-
-    // 本地文件头里的名称 / 扩展字段长度可能和中央目录不同，需重新读取
-    const localNameLength = view.getUint16(localOffset + 26, true);
-    const localExtraLength = view.getUint16(localOffset + 28, true);
-    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
-
-    entries.push({
-      name,
-      method,
-      compressedSize,
-      uncompressedSize,
-      data: bytes.subarray(dataStart, dataStart + compressedSize)
-    });
-
-    pointer += 46 + nameLength + extraLength + commentLength;
-  }
-
-  return entries;
-}
-
-/** 使用浏览器原生 API 解 deflate-raw */
-async function inflateRaw(data) {
-  if (typeof DecompressionStream === 'undefined') {
-    throw new Error('当前浏览器不支持解压 .lottie');
-  }
-  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
-async function readZipEntry(entry) {
-  if (entry.method === 0) return entry.data;
-  if (entry.method === 8) return inflateRaw(entry.data);
-  throw new Error(`不支持的压缩方式（${entry.method}）`);
-}
-
-/** 解开 .lottie，取出其中的动画 JSON */
-async function unzipDotLottie(base64) {
-  const bytes = base64ToBytes(base64);
-  const entries = readZipEntries(bytes);
-  if (!entries.length) throw new Error('.lottie 包内容为空');
-
-  const manifestEntry = entries.find((e) => /^manifest\.json$/i.test(e.name));
-  const jsonEntries = entries.filter((e) => /\.json$/i.test(e.name) && !/manifest\.json$/i.test(e.name));
-  if (!jsonEntries.length) throw new Error('.lottie 中没有找到动画 JSON');
-
-  // 规范位置是 animations/<id>.json，优先取它
-  const preferred = jsonEntries.find((e) => /^animations\/[^/]+\.json$/i.test(e.name));
-  const picked = preferred || jsonEntries[0];
-
-  const text = new TextDecoder().decode(await readZipEntry(picked));
-  const parsed = JSON.parse(text);
-  const anim = findAnimation(parsed) || parsed;
-
-  if (!isAnimation(anim)) throw new Error('.lottie 中的 JSON 不是有效的 Lottie 动画');
-
-  // 读取 manifest 中的动画 id，仅作为名称参考（不强制）
-  let nameHint = '';
-  if (manifestEntry) {
-    try {
-      const manifest = JSON.parse(new TextDecoder().decode(await readZipEntry(manifestEntry)));
-      const first = Array.isArray(manifest.animations) ? manifest.animations[0] : null;
-      if (first && typeof first.id === 'string') nameHint = first.id;
-    } catch {
-      /* 忽略 */
-    }
-  }
-
-  return { json: anim, text: JSON.stringify(anim), nameHint };
-}
+// 解包实现统一放在 shared/dotlottie.js，后台按 JSON 格式下载时也会复用。
 
 // ---------------------------------------------------------------- 预览
 
@@ -589,6 +533,7 @@ async function openPreview(asset) {
   els.preview.hidden = false;
   els.pvName.textContent = `${asset.name}.${asset.kind === 'lottie' ? 'lottie' : 'json'}`;
   els.pvMeta.textContent = fullMeta(asset);
+  els.pvDownload.textContent = formatLabel(state.downloadFormat);
   els.pvError.hidden = true;
   els.pvLoading.hidden = false;
   els.pvStage.className = 'pv-stage bg-checker';
@@ -714,11 +659,22 @@ function bindEvents() {
     render();
   });
 
+  els.fmtSwitch.addEventListener('click', (event) => {
+    const btn = event.target.closest('.fmt-btn');
+    if (!btn) return;
+    const format = btn.dataset.format === 'json' ? 'json' : 'zip';
+    if (format === state.downloadFormat) return;
+    state.downloadFormat = format;
+    saveFormat(format);
+    renderFooter();
+    updateDownloadLabels();
+  });
+
   els.zip.addEventListener('click', () => {
     const ids = visibleAssets().map((a) => a.id);
     if (ids.length === 0) return;
-    if (ids.length === 1) downloadAssets(ids);
-    else downloadZip(ids);
+    if (ids.length === 1) downloadAssets(ids, state.downloadFormat);
+    else downloadZip(ids, state.downloadFormat);
   });
 
   els.pvClose.addEventListener('click', closePreview);
@@ -754,7 +710,7 @@ function bindEvents() {
 
   els.pvDownload.addEventListener('click', () => {
     if (!state.previewAsset) return;
-    downloadAssets([state.previewAsset.id]);
+    downloadAssets([state.previewAsset.id], state.downloadFormat);
   });
 
   els.pvCopy.addEventListener('click', async () => {
@@ -821,16 +777,24 @@ async function requestScan(showFeedback) {
   }, 520);
 }
 
-async function downloadAssets(ids) {
-  const res = await sendBackground({ type: 'DOWNLOAD', ids });
-  if (res && res.ok) toast(`已开始下载 ${res.count} 个文件`);
-  else toast('下载失败，请重试', 'error');
+async function downloadAssets(ids, format) {
+  const res = await sendBackground({ type: 'DOWNLOAD', ids, format });
+  if (res && res.ok) {
+    const what = format === 'json' ? 'JSON' : '文件';
+    toast(`已开始下载 ${res.count} 个${what}`);
+  } else {
+    toast('下载失败，请重试', 'error');
+  }
 }
 
-async function downloadZip(ids) {
-  const res = await sendBackground({ type: 'DOWNLOAD_ZIP', ids });
-  if (res && res.ok) toast(`已打包 ${res.count} 个动画`);
-  else toast('打包下载失败，请重试', 'error');
+async function downloadZip(ids, format) {
+  const res = await sendBackground({ type: 'DOWNLOAD_ZIP', ids, format });
+  if (res && res.ok) {
+    const what = format === 'json' ? ' JSON 文件' : '动画';
+    toast(`已打包 ${res.count} 个${what}`);
+  } else {
+    toast('打包下载失败，请重试', 'error');
+  }
 }
 
 // ---------------------------------------------------------------- 启动

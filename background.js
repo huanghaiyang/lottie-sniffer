@@ -7,6 +7,7 @@
  *  3. 动画正文持久化到 chrome.storage.local（大文件多，需 unlimitedStorage）；
  *  4. 处理「按 URL 抓取」提示（DOM 扫描发现但页面自身没请求过的地址，可绕过 CORS）；
  *  5. 下载单个 / 批量下载（自行打包为 ZIP，不需要额外依赖）；
+ *     下载方式可选「JSON」（.lottie 会先解包成动画 JSON）或「压缩包」（保留原始格式）；
  *  6. 维护标签页角标数量，页面切换 / 关闭时清理数据。
  */
 import {
@@ -15,6 +16,7 @@ import {
   MAX_TEXT_BYTES,
   MAX_BINARY_BYTES
 } from './shared/detect.js';
+import { unzipDotLottie } from './shared/dotlottie.js';
 
 /** 单个标签页最多保留的动画数量 */
 const MAX_ASSETS_PER_TAB = 40;
@@ -501,9 +503,13 @@ function encodeBody(asset, body) {
   return null;
 }
 
+/** 下载方式：json = 解包后的动画 JSON；zip = 保留原始格式（.lottie / .json） */
+function normalizeFormat(format) {
+  return format === 'json' ? 'json' : 'zip';
+}
+
 /** 生成唯一的文件名（同名时追加序号） */
-function uniqueFilename(asset, used) {
-  const { ext } = kindInfo(asset.kind);
+function uniqueFilename(asset, ext, used) {
   const base = sanitizeName(asset.name) || 'animation';
   let name = `${base}.${ext}`;
   let i = 2;
@@ -515,26 +521,72 @@ function uniqueFilename(asset, used) {
   return name;
 }
 
-async function downloadAssets(ids) {
+/**
+ * 按指定下载方式把一个资产转换成待写盘的文件。
+ *
+ * - json：优先直接使用已捕获的 JSON 文本；`.lottie` 包则解压取出里面的动画 JSON，
+ *   统一以 `.json` 命名，方便直接拖进设计/开发工具。
+ * - zip：保留原始格式，`.lottie` 下发给 `.lottie`，JSON 下发给 `.json`。
+ *
+ * @returns {Promise<{name: string, bytes: Uint8Array, mime: string}|null>}
+ */
+async function assetToFile(asset, body, format, used) {
+  if (format === 'json') {
+    let text = null;
+    if (typeof body.text === 'string') {
+      text = body.text;
+    } else if (typeof body.base64 === 'string') {
+      try {
+        text = (await unzipDotLottie(body.base64)).text;
+      } catch {
+        // 损坏的 .lottie 包：跳过该文件，不影响其余动画下载
+        return null;
+      }
+    }
+    if (!text) return null;
+    return {
+      name: uniqueFilename(asset, 'json', used),
+      bytes: new TextEncoder().encode(text),
+      mime: 'application/json'
+    };
+  }
+
+  const bytes = encodeBody(asset, body);
+  if (!bytes) return null;
+  const info = kindInfo(asset.kind);
+  return {
+    name: uniqueFilename(asset, info.ext, used),
+    bytes,
+    mime: info.mime
+  };
+}
+
+/** 读取一批资产并按下载方式生成文件列表（正文缺失 / 解包失败的条目会被跳过） */
+async function collectFiles(ids, format) {
   const used = new Set();
-  let count = 0;
+  const files = [];
 
   for (const id of ids) {
     const asset = await findAsset(id);
     if (!asset) continue;
-
     const body = await loadAssetBody(asset);
-    const bytes = encodeBody(asset, body);
-    if (!bytes) continue;
+    if (!body) continue;
+    const file = await assetToFile(asset, body, format, used);
+    if (file) files.push(file);
+  }
 
-    const { mime } = kindInfo(asset.kind);
-    const filename = uniqueFilename(asset, used);
-    const dataUrl = `data:${mime};base64,${bytesToBase64(bytes)}`;
+  return files;
+}
 
+async function downloadAssets(ids, format) {
+  const files = await collectFiles(ids, format);
+  let count = 0;
+
+  for (const file of files) {
     try {
       await downloadUrl({
-        url: dataUrl,
-        filename,
+        url: `data:${file.mime};base64,${bytesToBase64(file.bytes)}`,
+        filename: file.name,
         saveAs: false,
         conflictAction: 'uniquify'
       });
@@ -656,21 +708,8 @@ function crc32(bytes) {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-async function downloadZip(ids) {
-  if (ids.length === 1) return downloadAssets(ids);
-
-  const used = new Set();
-  const files = [];
-
-  for (const id of ids) {
-    const asset = await findAsset(id);
-    if (!asset) continue;
-    const body = await loadAssetBody(asset);
-    const bytes = encodeBody(asset, body);
-    if (!bytes) continue;
-    files.push({ name: uniqueFilename(asset, used), bytes });
-  }
-
+async function downloadZip(ids, format) {
+  const files = await collectFiles(ids, format);
   if (!files.length) return { ok: false, count: 0 };
 
   const zip = buildZip(files);
@@ -760,10 +799,16 @@ async function handleMessage(message, sender) {
     }
 
     case 'DOWNLOAD':
-      return downloadAssets(Array.isArray(message.ids) ? message.ids : []);
+      return downloadAssets(
+        Array.isArray(message.ids) ? message.ids : [],
+        normalizeFormat(message.format)
+      );
 
     case 'DOWNLOAD_ZIP':
-      return downloadZip(Array.isArray(message.ids) ? message.ids : []);
+      return downloadZip(
+        Array.isArray(message.ids) ? message.ids : [],
+        normalizeFormat(message.format)
+      );
 
     case 'CLEAR':
       await clearTab(message.tabId);
